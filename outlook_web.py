@@ -13,6 +13,7 @@ Works on: macOS, Linux (including WSL), Windows
 """
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import shutil
 import ssl
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,9 +43,10 @@ def load_config() -> dict:
     return {}
 
 
-def get_credentials(config: dict, target: str) -> tuple[str | None, str | None]:
+def get_credentials(config: dict, target: str, prompt_password: bool = False) -> tuple[str | None, str | None]:
     """
     Get username and password for a target from config.
+    If password not in config and prompt_password=True, prompt user.
     """
     targets = config.get("targets", {})
     if target not in targets:
@@ -53,8 +56,11 @@ def get_credentials(config: dict, target: str) -> tuple[str | None, str | None]:
     username = target_config.get("username")
     password = target_config.get("password")
     
-    if username and not password:
-        print(f"⚠ No password in config for {username} - manual login required", file=sys.stderr)
+    if username and not password and prompt_password:
+        print(f"Password required for {username}", file=sys.stderr)
+        password = getpass.getpass("Password: ")
+    elif username and not password:
+        print(f"⚠ No password in config for {username}", file=sys.stderr)
     
     return username, password
 
@@ -106,86 +112,120 @@ def get_calendar_events(
         
         calendar_url = "https://outlook.office.com/calendar/view/month"
         print(f"Opening Outlook calendar (using {browser})...", file=sys.stderr)
-        page.goto(calendar_url, wait_until="domcontentloaded", timeout=60000)
+        page.goto(calendar_url, wait_until="networkidle", timeout=60000)
         
-        # Wait a moment for any redirects
-        page.wait_for_timeout(2000)
+        # Wait for any redirects to complete
+        page.wait_for_timeout(3000)
         
-        # Check if we need to log in - check current URL
-        current_url = page.url
-        needs_login = any(x in current_url for x in [
-            "login.microsoftonline.com",
-            "login.live.com", 
-            "login.microsoft.com",
-            "microsoftonline.com/oauth",
-            "microsoftonline.com/common"
-        ])
+        mfa_code_shown = False
+        login_complete = False
+        username_entered = False
+        password_entered = False
         
-        if needs_login:
-            # Try auto-login if credentials provided
-            if username:
-                print(f"Attempting auto-login for {username}...", file=sys.stderr)
-                try:
-                    # Wait for email input field
-                    email_input = page.locator('input[type="email"], input[name="loginfmt"]')
-                    email_input.wait_for(timeout=10000)
-                    email_input.fill(username)
-                    
-                    # Click next
-                    next_btn = page.locator('input[type="submit"], button[type="submit"]')
-                    next_btn.click()
-                    page.wait_for_timeout(2000)
-                    
-                    # If password provided, fill it in
-                    if password:
-                        password_input = page.locator('input[type="password"], input[name="passwd"]')
-                        password_input.wait_for(timeout=10000)
-                        password_input.fill(password)
-                        
-                        # Click sign in
-                        signin_btn = page.locator('input[type="submit"], button[type="submit"]')
-                        signin_btn.click()
-                        page.wait_for_timeout(3000)
-                        
-                        # Handle "Stay signed in?" prompt if it appears
-                        try:
-                            no_btn = page.locator('text=/No|Decline/i').first
-                            if no_btn:
-                                no_btn.click(timeout=3000)
-                        except:
-                            pass
-                except Exception as e:
-                    print(f"Auto-login failed: {e}", file=sys.stderr)
-                    print("Falling back to manual login...", file=sys.stderr)
-            
-            # Check if still needs login
-            page.wait_for_timeout(2000)
+        # Poll for up to 5 minutes for login to complete
+        for i in range(60):  # 60 * 5 seconds = 5 minutes
             current_url = page.url
-            still_needs_login = any(x in current_url for x in [
-                "login.microsoftonline.com",
-                "login.live.com",
-                "login.microsoft.com"
-            ])
             
-            if still_needs_login:
-                print("\n" + "=" * 50, file=sys.stderr)
-                print("🔐 LOGIN REQUIRED", file=sys.stderr)
-                print("=" * 50, file=sys.stderr)
-                print("Please complete login in the browser (MFA may be required).", file=sys.stderr)
-                print("Take your time - the script will wait up to 10 minutes.", file=sys.stderr)
-                print("=" * 50 + "\n", file=sys.stderr)
+            # Check if we've reached the calendar - LOGIN COMPLETE!
+            if "outlook.office.com/calendar" in current_url or "outlook.office365.com/calendar" in current_url:
+                if not login_complete:
+                    print("✓ Login successful!", file=sys.stderr)
+                    login_complete = True
+                break
             
-            # Wait for redirect back to calendar (up to 10 minutes for login + MFA)
+            # Try to fill in email if the field is present
+            if username and not username_entered:
+                try:
+                    email_input = page.locator('input[name="loginfmt"]').first
+                    if email_input.is_visible(timeout=2000):
+                        print(f"Entering username: {username}", file=sys.stderr)
+                        email_input.fill(username)
+                        page.wait_for_timeout(500)
+                        # Click next/submit
+                        submit_btn = page.locator('#idSIButton9').first
+                        if submit_btn.is_visible(timeout=2000):
+                            submit_btn.click()
+                            username_entered = True
+                        page.wait_for_timeout(3000)
+                        continue
+                except Exception as e:
+                    pass
+            
+            # Try to fill in password if the field is present
+            if password and username_entered and not password_entered:
+                try:
+                    password_input = page.locator('input[name="passwd"]').first
+                    if password_input.is_visible(timeout=2000):
+                        print("Entering password...", file=sys.stderr)
+                        password_input.fill(password)
+                        page.wait_for_timeout(500)
+                        # Click sign in
+                        submit_btn = page.locator('#idSIButton9').first
+                        if submit_btn.is_visible(timeout=2000):
+                            submit_btn.click()
+                            password_entered = True
+                        page.wait_for_timeout(3000)
+                        continue
+                except Exception as e:
+                    pass
+            
+            # Check for "Stay signed in?" prompt and click No
             try:
-                page.wait_for_url(
-                    lambda url: "outlook.office.com/calendar" in url or "outlook.office365.com/calendar" in url,
-                    timeout=600000  # 10 minutes
-                )
-                print("\n✓ Login successful!\n", file=sys.stderr)
-            except PlaywrightTimeout:
-                print("\n❌ Login timeout. Please try again.", file=sys.stderr)
-                context.close()
-                return []
+                no_btn = page.locator('#idBtn_Back').first
+                if no_btn.is_visible(timeout=1000):
+                    print("Declining 'Stay signed in'...", file=sys.stderr)
+                    no_btn.click()
+                    page.wait_for_timeout(2000)
+                    continue
+            except:
+                pass
+            
+            # Check for MFA number display
+            if not mfa_code_shown and password_entered:
+                try:
+                    # Look for the MFA number element
+                    mfa_number = page.locator('#idRichContext_DisplaySign').first
+                    if mfa_number.is_visible(timeout=1000):
+                        number = mfa_number.inner_text().strip()
+                        if number and number.isdigit():
+                            print("\n" + "=" * 50, file=sys.stderr)
+                            print("🔐 TWO-FACTOR AUTHENTICATION", file=sys.stderr)
+                            print("=" * 50, file=sys.stderr)
+                            print(f"\n   Enter this number in Microsoft Authenticator:\n", file=sys.stderr)
+                            print(f"                    [ {number} ]", file=sys.stderr)
+                            print(f"\n   Waiting for approval...", file=sys.stderr)
+                            print("=" * 50 + "\n", file=sys.stderr)
+                            mfa_code_shown = True
+                except:
+                    pass
+            
+            # Fallback: check page text for MFA number
+            if not mfa_code_shown and password_entered:
+                try:
+                    page_text = page.inner_text('body')
+                    if 'Approve sign in' in page_text or 'number shown' in page_text.lower():
+                        # Find 2-digit number
+                        match = re.search(r'(?:^|\s)(\d{2})(?:\s|$)', page_text)
+                        if match:
+                            number = match.group(1)
+                            print("\n" + "=" * 50, file=sys.stderr)
+                            print("🔐 TWO-FACTOR AUTHENTICATION", file=sys.stderr)
+                            print("=" * 50, file=sys.stderr)
+                            print(f"\n   Enter this number in Microsoft Authenticator:\n", file=sys.stderr)
+                            print(f"                    [ {number} ]", file=sys.stderr)
+                            print(f"\n   Waiting for approval...", file=sys.stderr)
+                            print("=" * 50 + "\n", file=sys.stderr)
+                            mfa_code_shown = True
+                except:
+                    pass
+            
+            # Wait before next check
+            page.wait_for_timeout(5000)
+        
+        if not login_complete:
+            print("\n❌ Login failed or timed out.", file=sys.stderr)
+            context.close()
+            return []
         
         # Wait for calendar to fully load
         print("Waiting for calendar to load...", file=sys.stderr)
@@ -525,17 +565,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Fetch calendar with manual login
-  %(prog)s
-  
-  # Use a configured target account
+  # Fetch calendar with browser GUI
   %(prog)s --target work
   
+  # Run completely from command line (headless + password prompt)
+  %(prog)s --target work --cli
+  
   # Output as JSON and POST to URL
-  %(prog)s --target work --json --post
+  %(prog)s --target work --cli --json --post
   
   # Save iCal to file
-  %(prog)s --target personal --ical -o calendar.ics
+  %(prog)s --target personal --cli --ical -o calendar.ics
 """
     )
     parser.add_argument(
@@ -556,9 +596,14 @@ Examples:
         help="Number of days to look ahead. Default: 14"
     )
     parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Run in CLI-only mode: headless browser, prompt for password if not in config, show 2FA code in terminal"
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
-        help="Run in headless mode (no GUI). Only use after first login."
+        help="Run browser in headless mode (no GUI window)"
     )
     parser.add_argument(
         "--ical", "-i",
@@ -587,6 +632,10 @@ Examples:
     )
     args = parser.parse_args()
     
+    # --cli implies --headless
+    if args.cli:
+        args.headless = True
+    
     # Load configuration
     config = load_config()
     
@@ -604,7 +653,8 @@ Examples:
     # Get credentials if target specified
     username, password = None, None
     if args.target:
-        username, password = get_credentials(config, args.target)
+        # In CLI mode, prompt for password if not in config
+        username, password = get_credentials(config, args.target, prompt_password=args.cli)
         if not username:
             print(f"❌ Target '{args.target}' not found in config.toml", file=sys.stderr)
             print("Use --list-targets to see available targets", file=sys.stderr)

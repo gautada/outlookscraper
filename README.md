@@ -11,6 +11,7 @@ Fetches your next 14 days of calendar events by automating the Outlook web inter
 **Features:**
 - Uses your regular Microsoft login (no Azure app registration needed)
 - Multiple account support via `config.toml` targets
+- **CLI-only mode**: Headless browser with password prompt and 2FA code display
 - Auto-login with credentials from config
 - Output formats: text, iCal (.ics), JSON
 - POST to URL with mTLS authentication
@@ -84,17 +85,28 @@ Only needed if using the Graph API version. Requires Azure AD app registration a
 
 ## Usage
 
-### Basic (manual login)
-
-```bash
-uv run python outlook_web.py
-```
-
-### With target account (auto-fills credentials)
+### With browser GUI
 
 ```bash
 uv run python outlook_web.py --target work
-uv run python outlook_web.py -t personal
+```
+
+### CLI-only mode (no GUI)
+
+Run completely from the command line with `--cli`:
+- Prompts for password if not in config
+- Displays 2FA verification number in terminal
+- Runs browser headlessly (no window)
+
+```bash
+# Will prompt for password and show 2FA code
+uv run python outlook_web.py --target work --cli
+
+# With JSON output
+uv run python outlook_web.py --target work --cli --json
+
+# POST to endpoint
+uv run python outlook_web.py --target work --cli --json --post
 ```
 
 ### Output formats
