@@ -1,0 +1,23 @@
+# Calendar Scripts Configuration
+# Copy this to config.toml and fill in your details
+
+# Post endpoint for calendar data (optional)
+[post]
+url = "https://api.example.com/calendar"
+
+# mTLS certificates (optional - defaults to ~/.config/cauth/)
+[mtls]
+ca = "~/.config/cauth/ca.pem"
+cert = "~/.config/cauth/crt.pem"
+key = "~/.config/cauth/key.pem"
+
+# Target accounts - add as many as you need
+# If password is omitted, you'll need to complete login manually in the browser
+
+[targets.work]
+username = "user@company.com"
+# password = "your-password"  # Optional - omit for manual login
+
+[targets.personal]
+username = "user@outlook.com"
+# password = "your-password"
